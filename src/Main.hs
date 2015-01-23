@@ -3,13 +3,14 @@
 module Main where
 
 import           Control.Arrow          (first)
-import           Data.Bits              (xor, popCount)
+import           Data.Bits              (popCount, xor)
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Base16 as B16
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8  as C8
 import           Data.Char              (ord)
-import           Data.List              (sortBy)
+import           Data.List              (transpose, unfoldr)
+import           Data.List.Key          (sort)
 import qualified Data.Map               as M
 import qualified Data.Set               as S
 import qualified Data.Word8             as W8
@@ -37,15 +38,16 @@ xorSingle :: W8.Word8 -> BS.ByteString -> BS.ByteString
 xorSingle w = BS.map (xor w)
 
 rankBy :: (BS.ByteString -> Int) -> [BS.ByteString] -> [BS.ByteString]
-rankBy score = reverse . sortBy f where
-		f a b = compare (score a) (score b)
+rankBy score = reverse . sort score
 
 possibilities :: BS.ByteString -> [BS.ByteString]
 possibilities s = map (`xorSingle` s) [minBound..maxBound]
 
 decodeXor :: String -> String
---decodeXor = C8.unpack . head . rankBy score . possibilities . fromHex
-decodeXor !s = (C8.unpack . head . rankBy score . possibilities . fromHex) s
+decodeXor = C8.unpack . head . rankBy score . possibilities . fromHex
+
+decodeXorBS :: BS.ByteString -> BS.ByteString
+decodeXorBS = head . rankBy score . possibilities
 
 -- Ch 4
 englishFrequencies' :: [(Char, Float)]
@@ -65,7 +67,7 @@ englishFrequencies :: M.Map W8.Word8 Float
 englishFrequencies = M.fromList $ map (first (fromIntegral . ord)) englishFrequencies'
 
 score :: BS.ByteString -> Int
-score s = {-# SCC score #-} M.foldrWithKey f 0 fr where
+score s = M.foldrWithKey f 0 fr where
     n = BS.length s
     fr = freqs (BS.map W8.toLower s)
     f ch ct acc = case M.lookup ch englishFrequencies of
@@ -79,7 +81,7 @@ freqs = BS.foldr' f M.empty where
     f w = M.insertWith' (+) w 1
 
 decodeAll :: [String] -> String
-decodeAll = {-# SCC decodeAll #-} C8.unpack . head . rankBy score . map (C8.pack . decodeXor)
+decodeAll = C8.unpack . head . rankBy score . map (C8.pack . decodeXor)
 
 -- Ch 5
 xorEncrypt :: String -> String -> String
@@ -89,18 +91,43 @@ xorEncrypt text k = (C8.unpack . B16.encode . BS.pack) (BS.zipWith xor bsText (r
 
 -- Ch 6
 dist :: BS.ByteString -> BS.ByteString -> Int
-dist = sum . map popCount . BS.zipWith xor
+dist s = sum . map popCount . BS.zipWith xor s
 
 first2chunks :: Int -> BS.ByteString -> (BS.ByteString, BS.ByteString)
 first2chunks n s = (a, b) where
-    (a, rest) = splitAt n s
-    b = take n rest
+    (a, rest) = BS.splitAt n s
+    b = BS.take n rest
 
 -- bytestring is the total text, int is keysize, float is
 -- (hamming dist between first/second chunk of n bytes)/keysize
 normalized2delta :: BS.ByteString -> Int -> Float
-normalized2delta s n = (dist a b) / (fromIntegral n) where
-    (a, b) = first2chunks n
+normalized2delta s n = (fromIntegral $ dist a b) / (fromIntegral n) where
+    (a, b) = first2chunks n s
+
+bestKeysizes :: BS.ByteString -> Int -> [Int]
+bestKeysizes s n = take n $ sort (normalized2delta s) [2..40]
+
+-- break ciphertext into blocks of length n
+makeBlocks :: Int -> BS.ByteString -> [BS.ByteString]
+makeBlocks n = unfoldr f where
+    f s = let t@(a, _) = BS.splitAt n s in
+          if BS.null a
+             then Nothing
+             else Just t
+
+transposeBlocks :: [BS.ByteString] -> [BS.ByteString]
+transposeBlocks = map BS.pack . transpose . map BS.unpack
+
+solveWithKeysize :: BS.ByteString -> Int -> String
+solveWithKeysize s n = (C8.unpack . BS.concat . transposeBlocks . map decodeXorBS . transposeBlocks . makeBlocks n) s
+
+makeBlocks' :: Int -> String -> [String]
+makeBlocks' n = unfoldr f where
+    f s = let t@(a, _) = splitAt n s in
+          if null a
+             then Nothing
+             else Just t
+
 
 -- all challenges
 set1 :: [IO String]
