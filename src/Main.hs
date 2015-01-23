@@ -3,6 +3,9 @@
 module Main where
 
 import           Control.Arrow          (first)
+import qualified Crypto.Cipher          as Cipher
+import qualified Crypto.Cipher.AES      as AES
+import qualified Crypto.Cipher.Types    as CipherTypes
 import           Data.Bits              (popCount, xor)
 import qualified Data.ByteString        as BS
 import qualified Data.ByteString.Base16 as B16
@@ -11,6 +14,7 @@ import qualified Data.ByteString.Char8  as C8
 import           Data.Char              (ord)
 import           Data.List              (transpose, unfoldr)
 import           Data.List.Key          (sort)
+import           Data.List.Split        (chunksOf)
 import qualified Data.Map               as M
 import qualified Data.Set               as S
 import qualified Data.Word8             as W8
@@ -38,7 +42,7 @@ xorSingle :: W8.Word8 -> BS.ByteString -> BS.ByteString
 xorSingle w = BS.map (xor w)
 
 rankBy :: (BS.ByteString -> Int) -> [BS.ByteString] -> [BS.ByteString]
-rankBy score = reverse . sort score
+rankBy score = sort score
 
 possibilities :: BS.ByteString -> [BS.ByteString]
 possibilities s = map (`xorSingle` s) [minBound..maxBound]
@@ -50,6 +54,8 @@ decodeXorBS :: BS.ByteString -> BS.ByteString
 decodeXorBS = head . rankBy score . possibilities
 
 -- Ch 4
+type Histogram = M.Map W8.Word8 Int
+
 englishFrequencies' :: [(Char, Float)]
 englishFrequencies' = [ (' ', 0.183)
                      , ('e', 0.103)
@@ -67,17 +73,18 @@ englishFrequencies :: M.Map W8.Word8 Float
 englishFrequencies = M.fromList $ map (first (fromIntegral . ord)) englishFrequencies'
 
 score :: BS.ByteString -> Int
-score s = M.foldrWithKey f 0 fr where
+score s = histogramDiff histo engHisto where
     n = BS.length s
-    fr = freqs (BS.map W8.toLower s)
-    f ch ct acc = case M.lookup ch englishFrequencies of
-                    Nothing -> -ct + acc
-                    Just frac -> -(absDiff frac ct) + acc
-    absDiff :: Float -> Int -> Int
-    absDiff p ct = abs $ round (p * (fromIntegral n)) - ct
+    scale x = round $ (fromIntegral n) * x
+    engHisto = M.map scale englishFrequencies
+    histo = histogram (BS.map W8.toLower s)
 
-freqs :: BS.ByteString -> M.Map W8.Word8 Int
-freqs = BS.foldr' f M.empty where
+histogramDiff :: Histogram -> Histogram -> Int
+histogramDiff a b = M.fold (+) 0 $ M.unionWith f a b where
+    f x y = abs (x - y)
+
+histogram :: BS.ByteString -> Histogram
+histogram = BS.foldr' f M.empty where
     f w = M.insertWith' (+) w 1
 
 decodeAll :: [String] -> String
@@ -93,19 +100,15 @@ xorEncrypt text k = (C8.unpack . B16.encode . BS.pack) (BS.zipWith xor bsText (r
 dist :: BS.ByteString -> BS.ByteString -> Int
 dist s = sum . map popCount . BS.zipWith xor s
 
-first2chunks :: Int -> BS.ByteString -> (BS.ByteString, BS.ByteString)
-first2chunks n s = (a, b) where
-    (a, rest) = BS.splitAt n s
-    b = BS.take n rest
+pairDist :: [BS.ByteString] -> Int
+pairDist [a, b] = dist a b
+pairDist _ = 0
 
--- bytestring is the total text, int is keysize, float is
--- (hamming dist between first/second chunk of n bytes)/keysize
-normalized2delta :: BS.ByteString -> Int -> Float
-normalized2delta s n = (fromIntegral $ dist a b) / (fromIntegral n) where
-    (a, b) = first2chunks n s
+hammingCost :: BS.ByteString -> Int -> Int
+hammingCost s n = (sum . map pairDist . chunksOf 2 . map BS.pack . chunksOf n . BS.unpack) s
 
 bestKeysizes :: BS.ByteString -> Int -> [Int]
-bestKeysizes s n = take n $ sort (normalized2delta s) [2..40]
+bestKeysizes s n = take n $ sort (hammingCost s) [2..40]
 
 -- break ciphertext into blocks of length n
 makeBlocks :: Int -> BS.ByteString -> [BS.ByteString]
@@ -121,13 +124,29 @@ transposeBlocks = map BS.pack . transpose . map BS.unpack
 solveWithKeysize :: BS.ByteString -> Int -> String
 solveWithKeysize s n = (C8.unpack . BS.concat . transposeBlocks . map decodeXorBS . transposeBlocks . makeBlocks n) s
 
-makeBlocks' :: Int -> String -> [String]
-makeBlocks' n = unfoldr f where
-    f s = let t@(a, _) = splitAt n s in
-          if null a
-             then Nothing
-             else Just t
+cleanRead64 :: FilePath -> IO BS.ByteString
+cleanRead64 f = BS.readFile f >>= return . B64.decodeLenient . C8.filter (not . (== '\n'))
 
+bestDecryption :: [String] -> String
+bestDecryption = C8.unpack . head . rankBy score . map C8.pack
+
+solve6 :: BS.ByteString -> String
+solve6 s = bestDecryption . map (solveWithKeysize s) $ bestKeysizes s 5
+
+-- Ch 7
+
+key7 :: AES.AES
+key7 = AES.initAES (C8.pack "YELLOW SUBMARINE")
+
+decrypt7 :: BS.ByteString -> BS.ByteString
+decrypt7 = (key7 `AES.decryptECB`)
+
+keyStr :: BS.ByteString
+keyStr = C8.pack "YELLOW SUBMARINE"
+
+Right key = CipherTypes.makeKey keyStr
+aes128 :: Cipher.AES128
+aes128 = Cipher.cipherInit key
 
 -- all challenges
 set1 :: [IO String]
@@ -135,7 +154,8 @@ set1 = [ return $ hexToBase64 "49276d206b696c6c696e6720796f757220627261696e206c6
           return $ xorHex "1c0111001f010100061a024b53535009181c" "686974207468652062756c6c277320657965",
           return $ decodeXor "1b37373331363f78151b7f2b783431333d78397828372d363c78373e783a393b3736",
 --         readFile "src/s1c4.txt" >>= return . decodeAll . lines,
-         return $ xorEncrypt "Burning 'em, if you ain't quick and nimble\nI go crazy when I hear a cymbal" "ICE"]
+         return $ xorEncrypt "Burning 'em, if you ain't quick and nimble\nI go crazy when I hear a cymbal" "ICE",
+         cleanRead64 "src/6.txt" >>= return . solve6]
 
 
 main :: IO ()
