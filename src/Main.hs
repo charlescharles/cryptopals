@@ -3,6 +3,7 @@
 module Main where
 
 import           Control.Arrow          (first)
+import           Control.Monad          (liftM)
 import qualified Crypto.Cipher          as Cipher
 import qualified Crypto.Cipher.AES      as AES
 import qualified Crypto.Cipher.Types    as CipherTypes
@@ -12,8 +13,8 @@ import qualified Data.ByteString.Base16 as B16
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8  as C8
 import           Data.Char              (ord)
-import           Data.List              (transpose, unfoldr)
-import           Data.List.Key          (sort)
+import           Data.List              (group, sort, transpose, unfoldr)
+import qualified Data.List.Key          as K
 import           Data.List.Split        (chunksOf)
 import qualified Data.Map               as M
 import qualified Data.Set               as S
@@ -42,7 +43,7 @@ xorSingle :: W8.Word8 -> BS.ByteString -> BS.ByteString
 xorSingle w = BS.map (xor w)
 
 rankBy :: (BS.ByteString -> Int) -> [BS.ByteString] -> [BS.ByteString]
-rankBy score = sort score
+rankBy score = K.sort score
 
 possibilities :: BS.ByteString -> [BS.ByteString]
 possibilities s = map (`xorSingle` s) [minBound..maxBound]
@@ -108,7 +109,7 @@ hammingCost :: BS.ByteString -> Int -> Int
 hammingCost s n = (sum . map pairDist . chunksOf 2 . map BS.pack . chunksOf n . BS.unpack) s
 
 bestKeysizes :: BS.ByteString -> Int -> [Int]
-bestKeysizes s n = take n $ sort (hammingCost s) [2..40]
+bestKeysizes s n = take n $ K.sort (hammingCost s) [2..40]
 
 -- break ciphertext into blocks of length n
 makeBlocks :: Int -> BS.ByteString -> [BS.ByteString]
@@ -141,12 +142,14 @@ key7 = AES.initAES (C8.pack "YELLOW SUBMARINE")
 decrypt7 :: BS.ByteString -> BS.ByteString
 decrypt7 = (key7 `AES.decryptECB`)
 
-keyStr :: BS.ByteString
-keyStr = C8.pack "YELLOW SUBMARINE"
+-- Ch 8
 
-Right key = CipherTypes.makeKey keyStr
-aes128 :: Cipher.AES128
-aes128 = Cipher.cipherInit key
+-- count 16-byte block repetitions in hex string
+blockRepetitions :: String -> Int
+blockRepetitions = length . K.maximum length . group . sort . chunksOf 16
+
+solve8 :: String -> String
+solve8 = K.maximum blockRepetitions . lines
 
 -- all challenges
 set1 :: [IO String]
@@ -155,7 +158,8 @@ set1 = [ return $ hexToBase64 "49276d206b696c6c696e6720796f757220627261696e206c6
           return $ decodeXor "1b37373331363f78151b7f2b783431333d78397828372d363c78373e783a393b3736",
 --         readFile "src/s1c4.txt" >>= return . decodeAll . lines,
          return $ xorEncrypt "Burning 'em, if you ain't quick and nimble\nI go crazy when I hear a cymbal" "ICE",
-         cleanRead64 "src/6.txt" >>= return . solve6]
+         cleanRead64 "src/6.txt" >>= return . solve6,
+         solve8 `liftM` readFile "src/8.txt"]
 
 
 main :: IO ()
